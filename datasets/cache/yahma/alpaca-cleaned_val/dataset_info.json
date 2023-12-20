@@ -1,0 +1,67 @@
+{
+  "builder_name": "json",
+  "citation": "",
+  "config_name": "default",
+  "dataset_name": "alpaca-cleaned",
+  "dataset_size": 40283906,
+  "description": "",
+  "download_checksums": {
+    "hf://datasets/yahma/alpaca-cleaned@12567cabf869d7c92e573c7c783905fc160e9639/alpaca_data_cleaned.json": {
+      "num_bytes": 44307561,
+      "checksum": null
+    }
+  },
+  "download_size": 44307561,
+  "features": {
+    "output": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "instruction": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "input": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "input_ids": {
+      "feature": {
+        "dtype": "int32",
+        "_type": "Value"
+      },
+      "_type": "Sequence"
+    },
+    "attention_mask": {
+      "feature": {
+        "dtype": "int8",
+        "_type": "Value"
+      },
+      "_type": "Sequence"
+    },
+    "labels": {
+      "feature": {
+        "dtype": "int64",
+        "_type": "Value"
+      },
+      "_type": "Sequence"
+    }
+  },
+  "homepage": "",
+  "license": "",
+  "size_in_bytes": 84591467,
+  "splits": {
+    "train": {
+      "name": "train",
+      "num_bytes": 40283906,
+      "num_examples": 51760,
+      "dataset_name": "alpaca-cleaned"
+    }
+  },
+  "version": {
+    "version_str": "0.0.0",
+    "major": 0,
+    "minor": 0,
+    "patch": 0
+  }
+}

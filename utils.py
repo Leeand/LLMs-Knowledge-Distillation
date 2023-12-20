@@ -13,6 +13,10 @@ import logging
 import fnmatch
 import collections
 import pdb
+import torch
+import torch.nn as nn
+from torch.nn import functional as F
+from torch.nn import Softmax, CrossEntropyLoss
 
 class DistillDataCollatorForSeq2Seq:
 
@@ -112,6 +116,76 @@ def evaluate_metric(model_foreval):
     print(evaluator.make_table(results))
 
 
+def dynamic_kd_loss(student_logits, teacher_logits, temperature=1.0):
+    with torch.no_grad():   
+        student_probs = F.softmax(student_logits, dim=-1)
+        student_entropy = -torch.sum(student_probs * torch.log(student_probs + 1e-6), dim=-1) # student entropy, (bsz, )
+        # normalized entropy score by student uncertainty:
+        # i.e.,  entropy / entropy_upper_bound
+        # higher uncertainty indicates the student is more confusing about this instance
+        instance_weight = student_entropy / torch.log(torch.ones_like(student_entropy) * student_logits.size(1))
+    student_input = F.log_softmax(student_logits / temperature, dim=-1)
+    target = F.softmax(teacher_logits / temperature, dim=-1)
+    batch_loss = F.kl_div(student_input, target, reduction="none").sum(-1) * temperature ** 2  # bsz
+    weighted_kld = torch.mean(batch_loss * instance_weight)
+    return weighted_kld
+
+def focal_loss(student_logits, teacher_logits, temperature, labels):
+    batchsize = student_logits.shape[0]
+    seq_len = student_logits.shape[1]
+    vocabulary_size= student_logits.shape[-1]
+
+    # 将input_tensor中值为-100的位置置为0
+    
+
+    student_logits = student_logits[..., :-1, :].contiguous()
+    teacher_logits = teacher_logits[..., :-1, :].contiguous()
+
+
+    shift_labels = labels[..., 1:].contiguous()
+    shift_labels = shift_labels.to(student_logits.device)
+    shift_labels = shift_labels.squeeze()
+
+    student_logits = student_logits / temperature
+    teacher_logits = teacher_logits / temperature
+
+    logits_mask = torch.ones_like(shift_labels)
+    logits_mask[shift_labels == -100] = 0
+
+    criterion = CrossEntropyLoss(ignore_index=-100, reduction='none')
+    teacher_probs = F.softmax(teacher_logits)
+    ce_loss = -torch.sum(teacher_probs * F.log_softmax(student_logits), -1, keepdim=True) 
+    # ce_loss = ce_loss * logits_mask.unsqueeze(-1) 
+
+    student_detach = student_logits.detach()
+    teacher_detach = teacher_logits.detach()
+    # log_softmax_s =  F.log_softmax(student_detach)
+    # log_softmax_t =  F.log_softmax(teacher_detach)
+    # one_hot_labels = F.one_hot(shift_labels.view(-1), num_classes=student_logits.shape[-1]).float()
+    # ce_loss_s = -torch.sum(one_hot_labels * log_softmax_s, -1, keepdim=True)
+    # ce_loss_t = -torch.sum(one_hot_labels * log_softmax_t, -1, keepdim=True)
+    
+    ce_loss_s = criterion(student_detach.view(-1,vocabulary_size), shift_labels.view(-1)).reshape(student_detach.shape[:-1])
+    ce_loss_t = criterion(teacher_detach.view(-1,vocabulary_size), shift_labels.view(-1)).reshape(teacher_detach.shape[:-1])
+    pdb.set_trace()
+    focal_weight = ce_loss_s / (ce_loss_t + 1e-7)
+    ratio_lower = torch.zeros_like(focal_weight)
+    focal_weight = torch.max(focal_weight, ratio_lower)
+    focal_weight = 1 - torch.exp(-focal_weight)
+    pdb.set_trace()
+    ce_loss = focal_weight * ce_loss.squeeze()
+    loss = torch.mean(ce_loss) # (temperature**2) * 
+    pdb.set_trace()
+    return loss
+
+def dynamic_temperature(student_logits, teacher_logits):
+    tea_std = torch.std(teacher_logits, dim=-1,keepdim=True)
+    stu_std= torch.std(student_logits, dim=-1, keepdim=True)
+    p_s = F.log_softmax(student_logits/tea_std, dim=1)
+    p_t = F.softmax(teacher_logits/stu_std, dim=1)
+    pdb.set_trace()
+    loss = torch.sum(torch.sum(F.kl_div(p_s, p_t, reduction='none'), dim=-1) * (9 * torch.ones(y_s.shape[0],1).cuda())) /y_s.shape[0]/ y_s.shape[0]
+    return loss
 
 def util_evaluate(
     lm,
@@ -239,7 +313,7 @@ def util_evaluate(
 
 
 
-    pdb.set_trace()
+
     # execute each type of request
     for reqtype, reqs in requests.items():
         # TODO: right now, this code runs multiple separate LM requests for multiple Requests differing

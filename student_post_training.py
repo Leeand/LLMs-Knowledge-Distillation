@@ -81,29 +81,57 @@ def main(args):
             full_prompt = prompter.generate_prompt(
                 data_point["instruction"],
                 data_point["input"],
-                data_point["output"],
+                data_point["output"], 
+            )
+        elif 'boolq' in args.data_path.lower():
+            full_prompt = prompter.generate_prompt(
+                data_point["question"],
+                data_point["passage"],
+                data_point["answer"], 
             )
         else:
             raise NotImplementedError
 
         tokenized_full_prompt = tokenize(full_prompt)
+        # pdb.set_trace()
         if not args.train_on_inputs:
-            user_prompt = prompter.generate_prompt(
-                data_point["instruction"], data_point["input"] if 'input' in data_point.keys() else None,
-            )
-            tokenized_user_prompt = tokenize(
-                user_prompt, add_eos_token=args.add_eos_token
-            )
-            user_prompt_len = len(tokenized_user_prompt["input_ids"])
+            if 'alpaca' in args.data_path.lower() or 'lamini' in args.data_path.lower():
+                user_prompt = prompter.generate_prompt(
+                    data_point["instruction"], data_point["input"] if 'input' in data_point.keys() else None,
+                )
+                tokenized_user_prompt = tokenize(
+                    user_prompt, add_eos_token=args.add_eos_token
+                )
+                user_prompt_len = len(tokenized_user_prompt["input_ids"])
 
-            if args.add_eos_token:
-                user_prompt_len -= 1
+                if args.add_eos_token:
+                    user_prompt_len -= 1
 
-            tokenized_full_prompt["labels"] = [
-                -100
-            ] * user_prompt_len + tokenized_full_prompt["labels"][
-                user_prompt_len:
-            ]  # could be sped up, probably
+                tokenized_full_prompt["labels"] = [
+                    -100
+                ] * user_prompt_len + tokenized_full_prompt["labels"][
+                    user_prompt_len:
+                ]  # could be sped up, probably
+            elif 'boolq' in args.data_path.lower():
+                user_prompt = prompter.generate_prompt(
+                    data_point["question"],
+                    data_point["passage"],
+                )
+                tokenized_user_prompt = tokenize(
+                    user_prompt, add_eos_token=args.add_eos_token
+                )
+                user_prompt_len = len(tokenized_user_prompt["input_ids"])
+
+                if args.add_eos_token:
+                    user_prompt_len -= 1
+
+                tokenized_full_prompt["labels"] = [
+                    -100
+                ] * user_prompt_len + tokenized_full_prompt["labels"][
+                    user_prompt_len:
+                ]  # could be sped up, probably
+
+            
         return tokenized_full_prompt
 
     def split_and_tokenizer(test_data, tokenizer, seq_len, field_name):
@@ -223,7 +251,7 @@ if __name__ == "__main__":
     parser.add_argument('--base_model', type=str, default="decapoda-research/llama-7b-hf", help='base model name')
     parser.add_argument('--prune_model', type=str, help='prune model name')
     parser.add_argument('--data_path', type=str, default="yahma/alpaca-cleaned", help='data path')
-    parser.add_argument('--cache_dataset', action="store_true", default=False)
+    parser.add_argument('--cache_dataset', action="store_true", default=True)
     parser.add_argument('--extra_val_dataset', type=str, default=None, help='validation datasets. Split with ","')
     parser.add_argument('--output_dir', type=str, default="./lora-alpaca", help='output directory')
 
@@ -253,7 +281,7 @@ if __name__ == "__main__":
     parser.add_argument('--resume_from_checkpoint', type=str, help="either training checkpoint or final adapter")
 
     #ddp
-    parser.add_argument('--local_rank', type=int, default=-1)
+    parser.add_argument('--local_rank', type=int, default=0)
    
     args = parser.parse_args()
     torch_version = int(torch.__version__.split('.')[1])

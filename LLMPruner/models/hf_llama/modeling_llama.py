@@ -706,7 +706,6 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
 
         hidden_states = outputs[0]
         logits = self.lm_head(hidden_states)
-
         loss = None
         if labels is not None:
             # Shift so that tokens < n predict n
@@ -718,6 +717,8 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
             shift_labels = shift_labels.view(-1)
             # Enable model parallelism
             shift_labels = shift_labels.to(shift_logits.device)
+            shift_labels = shift_labels.squeeze()
+            # pdb.set_trace()
             loss = loss_fct(shift_logits, shift_labels)
 
         if not return_dict:

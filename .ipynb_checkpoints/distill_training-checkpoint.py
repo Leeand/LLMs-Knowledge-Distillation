@@ -2,7 +2,7 @@
 Refer to
 https://github.com/tloen/alpaca-lora/blob/main/finetune.py
 '''
-
+import pdb
 import json
 import os
 import sys
@@ -35,7 +35,7 @@ from LLMPruner.utils.prompter import Prompter, ZeroPrompter
 from LLMPruner.datasets.ppl_dataset import get_loaders
 from utils import DistillDataCollatorForSeq2Seq, evaluate_metric
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
+device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
 def main(args):
     # Set WanDB
@@ -47,7 +47,7 @@ def main(args):
 
     gradient_accumulation_steps = args.batch_size // args.micro_batch_size
     if not args.no_instruction:
-        prompter = Prompter(args.prompt_template_name)
+        prompter = Prompter(template_name = args.prompt_template_name)
     else:
         prompter = ZeroPrompter()
 
@@ -56,11 +56,11 @@ def main(args):
     if ddp:
         gradient_accumulation_steps = gradient_accumulation_steps // world_size
 
-    if device == 'cuda':
+    if device == 'cuda:0':
         model.half()
 
     tokenizer.pad_token_id = 0
-    tokenizer.padding_side = "left"
+    tokenizer.padding_side = "right"
 
     def tokenize(prompt, add_eos_token=True):
         result = tokenizer(
@@ -95,27 +95,65 @@ def main(args):
                 data_point["input"],
                 data_point["output"], 
             )
+        elif 'boolq' in args.data_path.lower():
+            # pdb.set_trace()
+            full_prompt = prompter.generate_prompt(
+                data_point["question"],
+                data_point["passage"],
+                data_point["answer"], 
+            )
         else:
             raise NotImplementedError
 
         tokenized_full_prompt = tokenize(full_prompt)
+        # pdb.set_trace()
         if not args.train_on_inputs:
-            user_prompt = prompter.generate_prompt(
-                data_point["instruction"], data_point["input"] if 'input' in data_point.keys() else None,
-            )
-            tokenized_user_prompt = tokenize(
-                user_prompt, add_eos_token=args.add_eos_token
-            )
-            user_prompt_len = len(tokenized_user_prompt["input_ids"])
+            if 'alpaca' in args.data_path.lower() or 'lamini' in args.data_path.lower():
+                user_prompt = prompter.generate_prompt(
+                    data_point["instruction"], data_point["input"] if 'input' in data_point.keys() else None,
+                )
+                tokenized_user_prompt = tokenize(
+                    user_prompt, add_eos_token=args.add_eos_token
+                )
+                user_prompt_len = len(tokenized_user_prompt["input_ids"])
 
-            if args.add_eos_token:
-                user_prompt_len -= 1
+                if args.add_eos_token:
+                    user_prompt_len -= 1
 
-            tokenized_full_prompt["labels"] = [
-                -100
-            ] * user_prompt_len + tokenized_full_prompt["labels"][
-                user_prompt_len:
-            ]  # could be sped up, probably
+                tokenized_full_prompt["labels"] = [
+                    -100
+                ] * user_prompt_len + tokenized_full_prompt["labels"][
+                    user_prompt_len:
+                ]  # could be sped up, probably
+            elif 'boolq' in args.data_path.lower():
+                # pdb.set_trace()
+                user_prompt = prompter.generate_prompt(
+                    data_point["question"],
+                    data_point["passage"],
+                )
+                tokenized_user_prompt = tokenize(
+                    user_prompt, add_eos_token=args.add_eos_token
+                )
+                user_prompt_len = len(tokenized_user_prompt["input_ids"])
+
+                if args.add_eos_token:
+                    user_prompt_len -= 1
+                
+                # print("=============================================")
+                # print(len(tokenized_full_prompt["input_ids"]))
+                # print(user_prompt_len)
+                # if len(tokenized_full_prompt["input_ids"]) == user_prompt_len:
+                #     print(full_prompt.replace("\n", "\\n"))
+                #     print(user_prompt.replace("\n", "\\n"))
+                #     pdb.set_trace()
+                # print("=============================================")
+
+                tokenized_full_prompt["labels"] = [
+                    -100
+                ] * user_prompt_len + tokenized_full_prompt["labels"][
+                    user_prompt_len:
+                ]  # could be sped up, probably
+        # pdb.set_trace()
         return tokenized_full_prompt
 
     def split_and_tokenizer(test_data, tokenizer, seq_len, field_name):
@@ -132,21 +170,35 @@ def main(args):
         return test_set
 
     # Prepare For LoRA
+    
     model = prepare_model_for_int8_training(model)
-    config = LoraConfig(
-        r=args.lora_r,
-        lora_alpha=args.lora_alpha,
-        target_modules=args.lora_target_modules.split(","),
-        lora_dropout=args.lora_dropout,
-        bias="none",
-        task_type="CAUSAL_LM"
-    )
-    model = get_peft_model(model, config)
-    model.print_trainable_parameters()  
+    
+    # pdb.set_trace()
+    if args.student_tune_model_config is None:
+        config = LoraConfig(
+            r=args.lora_r,
+            lora_alpha=args.lora_alpha,
+            target_modules=args.lora_target_modules.split(","),
+            lora_dropout=args.lora_dropout,
+            bias="none",
+            task_type="CAUSAL_LM"
+        )
+        model = get_peft_model(model, config)
+        model.print_trainable_parameters()
+    else:
+        model = PeftModel.from_pretrained(
+            model,
+            args.student_tune_model_config,
+            torch_dtype=torch.float16,
+        )
+
 
     # Load Train Dataset
     data = load_dataset(args.data_path)
+    print(args.data_path)
+    print(data)
     if args.cache_dataset and os.path.exists('datasets/cache/{}.bin'.format(args.data_path)):
+        # pdb.set_trace()
         preprocess_data = torch.load('datasets/cache/{}.bin'.format(args.data_path))
         train_data, val_data = preprocess_data['train'], preprocess_data['val']
     else:
@@ -156,9 +208,12 @@ def main(args):
         train_data = (
             train_val["train"].shuffle().map(generate_and_tokenize_prompt)
         )
+        train_data= train_data.select(range(13000))
+
         val_data = {
             args.data_path: train_val["test"].shuffle().map(generate_and_tokenize_prompt),
         }
+
         if args.cache_dataset and args.local_rank == 0:
             cache_file = 'datasets/cache/{}.bin'.format(args.data_path)
             cache_dir = '/'.join(cache_file.split('/')[:-1])
@@ -168,11 +223,10 @@ def main(args):
             torch.save({
                 'train': train_data, 'val': val_data
             }, cache_file)
-
+            print("dataset cache save success!")
     # Load Extra Validation Dataset
     if args.extra_val_dataset:
         from LLMPruner.datasets.ppl_dataset import get_wikitext2, get_ptb
-
         seq_len = 128
         for extra_dataset in args.extra_val_dataset.split(','):
             if 'wikitext2' in extra_dataset:
@@ -200,11 +254,24 @@ def main(args):
             torch_dtype=torch.float16,
         )
 
+
+    teacher_model.to(device)
+    student_model.to(device)
+
+    # pdb.set_trace()
+    teacher_num_trainable_params = sum(p.numel() for p in teacher_model.parameters() if p.requires_grad)
+    print("Teacher Number of trainable parameters:", teacher_num_trainable_params)
+    for name, param in student_model.named_parameters():
+        if 'lora' in name:  
+            param.requires_grad = True
+    student_num_trainable_params = sum(p.numel() for p in student_model.parameters() if p.requires_grad)
+    print("Student Number of trainable parameters:", student_num_trainable_params)
+
     if torch.cuda.device_count() > 1:
         print("Let's use", torch.cuda.device_count(), "GPUs!")
         # This will wrap your model and parallelize model computations
-        student_model = torch.nn.DataParallel(student_model)
-        teacher_model = torch.nn.DataParallel(teacher_model)
+        student_model = torch.nn.DataParallel(student_model, device_ids=[0,1,2,3], output_device=0)
+        teacher_model = torch.nn.DataParallel(teacher_model, device_ids=[0,1,2,3], output_device=0)
 
     teacher_model.eval()
 
@@ -232,8 +299,7 @@ def main(args):
     scheduler_args = {'num_warmup_steps': int(0.1 * num_training_steps), 'num_training_steps': num_training_steps}
     output_path = args.output_dir
 
-    teacher_model.to(device)
-    student_model.to(device)
+
 
     last_hidden_mse = [
         # {"layer_T": -1, "layer_S": -1, "feature": "hidden", "loss": "hidden_mse","weight": 1, "proj": ["linear", 4096, 5120]}
@@ -259,29 +325,37 @@ def main(args):
     # def callback(model, step):
     #     metric = evaluate_metric(model)
     #     print(f'Step {step} Evaluation Finish%')
-
+    hard_label_weight = args.hard_label_weight
+    kd_loss_weight = args.kd_loss_weight
+    print("=========================================================================")
+    print("hard_label_weight is {}, kd_loss_weight is {}".format(hard_label_weight,kd_loss_weight))
+    print("the temperature of kd loss is {}".format(args.temperature))
+    print("=========================================================================")
 
     distill_config = DistillationConfig(
-        temperature=8,
+        temperature=args.temperature,
         intermediate_matches=last_hidden_mse,
-        hard_label_weight=1,
-        kd_loss_weight = 1
+        hard_label_weight = hard_label_weight,
+        kd_loss_weight = kd_loss_weight
     )
     train_config = TrainingConfig(
         output_dir=output_path,
         ckpt_epoch_frequency=1, #多少个epoch保存1次
-        ckpt_frequency = 4 #每一个epoch保存多少次
+        ckpt_frequency = 10 #每一个epoch保存多少次
     )
 
     distiller = CustomDistiller(
         train_config=train_config, distill_config=distill_config,
         model_T=teacher_model, model_S=student_model,
         adaptor_T=simple_adaptor, adaptor_S=simple_adaptor,
-        logits_pro = ["linear",32000, 32000])
+        logits_pro = ["linear",32000, 32000],
+        global_step_start = args.global_step_start
+        )
 
     with distiller:
-        distiller.train(optimizer, train_dataloader, num_epochs, scheduler_class=scheduler_class,
-                        scheduler_args=scheduler_args)
+        # pdb.set_trace()
+        distiller.train(optimizer, train_dataloader, num_epochs, max_grad_norm=1)
+        # , scheduler_class=scheduler_class, scheduler_args=scheduler_args
 
     model.config.use_cache = False
     old_state_dict = model.state_dict
@@ -304,8 +378,9 @@ if __name__ == "__main__":
     parser.add_argument('--teacher_model_config', type=str, default=None, help='tuned teacher model ckpt config')
     parser.add_argument('--base_model', type=str, default="huggyllama/llama-13b", help='base model name')
     parser.add_argument('--prune_model', type=str, help='prune model name')
+    parser.add_argument('--student_tune_model_config', type=str, help='student LORA model name')
     parser.add_argument('--data_path', type=str, default="yahma/alpaca-cleaned", help='data path')
-    parser.add_argument('--cache_dataset', action="store_true", default=False)
+    parser.add_argument('--cache_dataset', action="store_true", default=True)
     parser.add_argument('--extra_val_dataset', type=str, default=None, help='validation datasets. Split with ","')
     parser.add_argument('--output_dir', type=str, default="./lora-alpaca", help='output directory')
 
@@ -318,6 +393,9 @@ if __name__ == "__main__":
     parser.add_argument('--val_set_size', type=int, default=2000, help='validation set size')
     parser.add_argument('--prompt_template_name', type=str, default="alpaca", help="The prompt template to use, will default to alpaca.")
     parser.add_argument('--no_instruction', action='store_true', default=False, help="Whether to use the instruction template or not.")
+    parser.add_argument('--hard_label_weight', type=float, default=1, help='student model label weight')
+    parser.add_argument('--kd_loss_weight', type=float, default=1, help='the weight of kd loss between teacher and student models')
+    parser.add_argument('--temperature', type=float, default=8, help='the temperature of kd loss')
 
     # Lora Configuration
     parser.add_argument('--lora_r', type=int, default=8, help='lora r')
@@ -335,7 +413,10 @@ if __name__ == "__main__":
     parser.add_argument('--resume_from_checkpoint', type=str, help="either training checkpoint or final adapter")
 
     #ddp
-    parser.add_argument('--local_rank', type=int, default=-1)
+    parser.add_argument('--local_rank', type=int, default=0)
+
+    #checkpoint
+    parser.add_argument('--global_step_start', type=int, default=0)
    
     args = parser.parse_args()
     torch_version = int(torch.__version__.split('.')[1])
