@@ -23,6 +23,9 @@ log/
 tiny_*
 lora-*
 results
+tune_log/
+teacher_tune_log/
+student_tune_log/
 
 # Ignore for lm-evaluation-harness
 env
