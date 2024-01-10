@@ -217,7 +217,7 @@ def main(args):
             train_val["test"].shuffle().map(generate_and_tokenize_prompt)
         )
 
-        if args.cache_dataset and args.local-rank == -1:
+        if args.cache_dataset and args.local_rank == -1:
             cache_file = 'datasets/cache/{}'.format(args.data_path)
             cache_dir = '/'.join(cache_file.split('/')[:-1])
             directory = Path(cache_dir)
@@ -308,14 +308,32 @@ def main(args):
     scheduler_args = {'num_warmup_steps': int(0.1 * num_training_steps), 'num_training_steps': num_training_steps}
     output_path = args.output_dir
 
+    #  最后一个block ，靠近output。然后再考虑加入其他的。 mse。算mse 之前进行归一化就可以。
+    intermediate_matches_configs=[]
+    if args.intermediate_control_config == 'config0':
+        intermediate_matches_configs = []
+    elif args.intermediate_control_config == 'config1':
+        intermediate_matches_configs = [
+            {"layer_T": 40, "layer_S": 32, "feature": "hidden", "loss": "hidden_mse", "weight": args.intermediate_weight, "proj": ["linear", 4096, 5120]}
+            ]
+    elif args.intermediate_control_config == 'config2-middle':
+        intermediate_matches_configs = [
+            {"layer_T": 40, "layer_S": 32, "feature": "hidden", "loss": "hidden_mse", "weight": args.intermediate_weight, "proj": ["linear", 4096, 5120]},
+            {"layer_T": 20, "layer_S": 16, "feature": "hidden", "loss": "hidden_mse", "weight": args.intermediate_weight, "proj": ["linear", 4096, 5120]}
+            ]
+    elif args.intermediate_control_config == 'config3-middle':
+        intermediate_matches_configs = [
+            {"layer_T": 40, "layer_S": 32, "feature": "hidden", "loss": "hidden_mse", "weight": args.intermediate_weight, "proj": ["linear", 4096, 5120]},
+            {"layer_T": 20, "layer_S": 16, "feature": "hidden", "loss": "hidden_mse", "weight": args.intermediate_weight, "proj": ["linear", 4096, 5120]},
+            {"layer_T": 15, "layer_S": 12, "feature": "hidden", "loss": "hidden_mse", "weight": args.intermediate_weight, "proj": ["linear", 4096, 5120]}
+            ]
+    elif args.intermediate_control_config == 'tinyl':
+        intermediate_matches_configs =[
+            {"layer_T": 40, "layer_S": 22, "feature": "hidden", "loss": "hidden_mse", "weight": args.intermediate_weight, "proj": ["linear", 2048, 5120]}]
 
-
-    intermediate_matches_configs = [
-        {"layer_T": 30, "layer_S": 23, "feature": "hidden", "loss": "hidden_mse","weight": 1, "proj": ["linear", 4096, 5120]},
-        {"layer_T": 20, "layer_S": 15, "feature": "hidden", "loss": "hidden_mse","weight": 1, "proj": ["linear", 4096, 5120]},
-        {"layer_T": 10, "layer_S": 8, "feature": "hidden", "loss": "hidden_mse","weight": 1, "proj": ["linear", 4096, 5120]},
-        ]
-
+        
+        
+        
     def simple_adaptor(batch, model_outputs):
         return {'logits': model_outputs.logits, 'hidden': model_outputs.hidden_states, 'losses': model_outputs.loss}
 
@@ -346,9 +364,13 @@ def main(args):
         logits_pro = ["linear",32000, 32000],
         global_step_start = args.global_step_start,
         use_softmax = args.use_softmax,
-        kd_type = args.kd_type #'dynamic_kd'
+        dt_normalization_type = args.dtnormalization_type,
+        intermediate_normalization_type = args.intermediate_normalization_type,
+        kd_type = args.kd_type, #'dynamic_kd',
+        intermediate_control_config=args.intermediate_control_config,
+        layer_weight=args.intermediate_weight
         )
-
+# logits_pro = ["linear",student voc size, teac]
     with distiller:
         # pdb.set_trace()
         distiller.train(optimizer, train_dataloader, num_epochs, max_grad_norm=1)
@@ -393,8 +415,12 @@ if __name__ == "__main__":
     parser.add_argument('--hard_label_weight', type=float, default=1, help='student model label weight')
     parser.add_argument('--kd_loss_weight', type=float, default=1, help='the weight of kd loss between teacher and student models')
     parser.add_argument('--temperature', type=float, default=8, help='the temperature of kd loss')
-    parser.add_argument('--kd_type', type=str, default="original_kd", help="Make sure the kd_type is in ['original_kd','dynamic_kd','focal_loss']")
+    parser.add_argument('--kd_type', type=str, default="original_kd", help="Make sure the kd_type is in ['original_kd','dynamic_kd','focal_loss','dynamic_temperature']")
+    parser.add_argument('--dtnormalization_type', type=str, default="", help="Make sure the dtnormalization_type is in ['','softmax','minmax','standardize']")
+    parser.add_argument('--intermediate_normalization_type', type=str, default="", help="Make sure the intermediate_normalization_type is in ['','softmax','minmax']")
     parser.add_argument('--use_softmax', default=False, action="store_true", help='softmax in original_kd')
+    parser.add_argument('--intermediate_control_config', type=str, default='config1', help='Choose the intermediate matches configuration')
+    parser.add_argument('--intermediate_weight', type=float, default=0.1, help='Weight for intermediate matches')
 
     # Lora Configuration
     parser.add_argument('--lora_r', type=int, default=8, help='lora r')

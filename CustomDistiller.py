@@ -4,7 +4,8 @@ from textbrewer.distiller_basic import BasicDistiller
 import pdb
 from LLMPruner.peft import get_peft_model_state_dict
 import wandb
-from utils import dynamic_kd_loss, focal_loss, dynamic_temperature
+import torch.distributed as dist
+from utils import dynamic_kd_loss, focal_loss, dynamic_temperature, minmax_normalize, softmax_normalize, standardize_tensor
 
 
 class CustomDistiller(GeneralDistiller):
@@ -18,23 +19,36 @@ class CustomDistiller(GeneralDistiller):
                  logits_pro,
                  global_step_start,
                  use_softmax,
+                 dt_normalization_type,
+                 intermediate_normalization_type,
                  kd_type : Optional[str] = "original_kd",
+                 intermediate_control_config='config0',
+                 layer_weight=0.1,
                  custom_matches: Optional[List[CustomMatch]] = None):
         # custom_matches=[{'module_T': module_T, 'module_S':module_S,
         #                 'loss': loss, 'weight': weight},...]
+        
         super(CustomDistiller, self).__init__(train_config, distill_config, model_T, model_S, adaptor_T, adaptor_S)
-        wandb.login()
-        run = wandb.init(
-            # Set the project where this run will be logged
-            project = os.environ["WANDB_PROJECT"],
-            # Track hyperparameters and run metadata
-            )
+        if dist.get_rank() == 0:
+            wandb.login()
+            experiment_name = f"middle_layer_DynamicT_k{self.d_config.kd_loss_weight}_h{self.d_config.hard_label_weight}_lw{layer_weight}_{intermediate_control_config}"
+            run = wandb.init(
+                name=experiment_name,
+                # Set the project where this run will be logged
+                project = os.environ["WANDB_PROJECT"],
+                tags=['A100_8_SXM', 'Distillation_baseline_Middle'],
+                notes='baseline plus intermedia distillation'
+                # Track hyperparameters and run metadata
+                )
 
         self.global_step_start = global_step_start
         self.use_softmax = use_softmax
         assert kd_type in ['original_kd','dynamic_kd','focal_loss','dynamic_temperature'],"kd_type is not in ['original_kd','dynamic_kd','focal_loss','dynamic_temperature']"
         self.kd_type = kd_type
-        
+        self.normalization_type = dt_normalization_type
+        assert dt_normalization_type in ['','minmax','softmax','standardize'],"normalization_type is not in ['','minmax','softmax','standardize']"
+        self.intermediate_normalization_type =  intermediate_normalization_type
+        assert intermediate_normalization_type in ['','minmax','softmax'],"intermediate_normalization_type is not in ['','minmax','softmax']"
         self.dynamic_kd_loss = dynamic_kd_loss
         self.focal_loss = focal_loss
         self.dynamic_temperature= dynamic_temperature 
@@ -178,7 +192,7 @@ class CustomDistiller(GeneralDistiller):
                     elif self.kd_type == 'focal_loss':
                         total_kd_loss += self.focal_loss(l_S, l_T, temperature, teacher_batch["labels"])
                     elif self.kd_type == 'dynamic_temperature':
-                        total_kd_loss += self.dynamic_temperature(l_S, l_T)
+                        total_kd_loss += self.dynamic_temperature(l_S, l_T, self.normalization_type)
                 
             else:
                 for l_T, l_S in zip(logits_list_T, logits_list_S):
@@ -199,7 +213,7 @@ class CustomDistiller(GeneralDistiller):
                     elif self.kd_type == 'focal_loss':
                         total_kd_loss += self.focal_loss(l_S, l_T, temperature, teacher_batch["labels"])
                     elif self.kd_type == 'dynamic_temperature':
-                        total_kd_loss += self.dynamic_temperature(l_S, l_T)
+                        total_kd_loss += self.dynamic_temperature(l_S, l_T,self.normalization_type)
                         
             total_loss += total_kd_loss * self.d_config.kd_loss_weight
             losses_dict['unweighted_kd_loss'] = total_kd_loss
@@ -208,6 +222,7 @@ class CustomDistiller(GeneralDistiller):
         inters_S = {feature: results_S.get(feature, []) for feature in FEATURES}
         inputs_mask_T = results_T.get('inputs_mask', None)
         inputs_mask_S = results_S.get('inputs_mask', None)
+        # pdb.set_trace()
         for ith, inter_match in enumerate(self.d_config.intermediate_matches):
             layer_T = inter_match.layer_T
             layer_S = inter_match.layer_S
@@ -215,6 +230,7 @@ class CustomDistiller(GeneralDistiller):
             loss_type = inter_match.loss
             match_weight = inter_match.weight
             match_loss = MATCH_LOSS_MAP[loss_type]
+
 
             if type(layer_S) is list and type(layer_T) is list:
                 inter_S = [inters_S[feature][s] for s in layer_S]
@@ -233,6 +249,18 @@ class CustomDistiller(GeneralDistiller):
                     # inter_T = self.projs[ith](inter_T)
                     inter_S = inter_S.float()
                     inter_S = self.projs[ith](inter_S)
+
+            if len(self.intermediate_normalization_type)>0:
+                if self.intermediate_normalization_type=='minmax':
+                    inter_S = minmax_normalize(inter_S)
+                    inter_T = minmax_normalize(inter_T)
+                elif self.intermediate_normalization_type=='softmax':
+                    inter_S = softmax_normalize(inter_S)
+                    inter_T = softmax_normalize(inter_T)
+                elif self.intermediate_normalization_type=='standardize':
+                    inter_S= standardize_tensor(inter_S)
+                    inter_T= standardize_tensor(inter_T)
+            
             intermediate_loss = match_loss(inter_S, inter_T, mask=inputs_mask_S)
             total_loss += intermediate_loss * match_weight
             losses_dict[f'unweighted_{feature}_{loss_type}_{name_S}_{name_T}'] = intermediate_loss
@@ -261,7 +289,8 @@ class CustomDistiller(GeneralDistiller):
                 value = value.item()
             formated_losses_dict[key]=value
         self.logger.info(formated_losses_dict)
-        # wandb.log({"unweighted_kd_loss": total_kd_loss, "unweighted_hard_label_loss": total_hl_loss})
+        if dist.get_rank() == 0:
+            wandb.log(formated_losses_dict)
         print(losses_dict)
         return total_loss, losses_dict
 

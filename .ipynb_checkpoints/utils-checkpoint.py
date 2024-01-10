@@ -167,94 +167,24 @@ def focal_loss(student_logits, teacher_logits, temperature, labels):
     
     ce_loss_s = criterion(student_detach.view(-1,vocabulary_size), shift_labels.view(-1)).reshape(student_detach.shape[:-1])
     ce_loss_t = criterion(teacher_detach.view(-1,vocabulary_size), shift_labels.view(-1)).reshape(teacher_detach.shape[:-1])
-    # pdb.set_trace()
+    pdb.set_trace()
     focal_weight = ce_loss_s / (ce_loss_t + 1e-7)
     ratio_lower = torch.zeros_like(focal_weight)
     focal_weight = torch.max(focal_weight, ratio_lower)
     focal_weight = 1 - torch.exp(-focal_weight)
-    # pdb.set_trace()
+    pdb.set_trace()
     ce_loss = focal_weight * ce_loss.squeeze()
     loss = torch.mean(ce_loss) # (temperature**2) * 
-    # pdb.set_trace()
+    pdb.set_trace()
     return loss
 
-
-def softmax_normalize(tensor, dim=-1):
-    """
-    对输入的三维 tensor 最后一个维度进行 softmax 归一化
-    
-    Parameters:
-    - tensor (torch.Tensor): 输入的三维 tensor
-    - dim (int): 归一化的维度，默认为最后一个维度
-
-    Returns:
-    - torch.Tensor: softmax 归一化后的 tensor
-    """
-    return F.softmax(tensor, dim=dim)
-
-def minmax_normalize(tensor, dim=-1):
-    """
-    对输入的三维 tensor 最后一个维度进行 min-max 归一化
-    
-    Parameters:
-    - tensor (torch.Tensor): 输入的三维 tensor
-    - dim (int): 归一化的维度，默认为最后一个维度
-    x_normal=(x-x_mean)/x_std
-    Returns:
-    - torch.Tensor: min-max 归一化后的 tensor
-    """
-    min_vals, _ = torch.min(tensor, dim=dim, keepdim=True)
-    max_vals, _ = torch.max(tensor, dim=dim, keepdim=True)
-    
-    # 防止除以零的情况，将最小值和最大值差异设为一个小的非零值
-    epsilon = 1e-8
-    normalized_tensor = (tensor - min_vals) / (max_vals - min_vals + epsilon)
-    
-    return normalized_tensor
-
-
-
-def standardize_tensor(tensor, dim=-1):
-    """
-    对输入的三维 tensor 最后一个维度进行标准化（Standardization）
-
-    Parameters:
-    - tensor (torch.Tensor): 输入的三维 tensor
-    - dim (int): 标准化的维度，默认为最后一个维度
-
-    Returns:
-    - torch.Tensor: 标准化后的 tensor
-    """
-    mean_vals = torch.mean(tensor, dim=dim, keepdim=True)
-    std_vals = torch.std(tensor, dim=dim, keepdim=True)
-    
-    # 防止除以零的情况，给标准差加上一个小的非零值
-    epsilon = 1e-8
-    standardized_tensor = (tensor - mean_vals) / (std_vals + epsilon)
-    
-    return standardized_tensor
-
-
-
-def dynamic_temperature(student_logits, teacher_logits, normalization_type=''):
-    # 对logits做normalize
-    if len(normalization_type)>0:
-        if normalization_type=='minmax':
-            student_logits = minmax_normalize(student_logits)
-            teacher_logits = minmax_normalize(teacher_logits)
-        elif normalization_type=='softmax':
-            student_logits = softmax_normalize(student_logits)
-            teacher_logits = softmax_normalize(teacher_logits)
-        elif normalization_type == 'standardize':
-            student_logits = standardize_tensor(student_logits)
-            teacher_logits = standardize_tensor(teacher_logits)
-
+def dynamic_temperature(student_logits, teacher_logits):
     tea_std = torch.std(teacher_logits, dim=-1,keepdim=True)
     stu_std= torch.std(student_logits, dim=-1, keepdim=True)
     p_s = F.log_softmax(student_logits/tea_std, dim=1)
     p_t = F.softmax(teacher_logits/stu_std, dim=1)
-    # pdb.set_trace()
-    loss = torch.sum(torch.sum(F.kl_div(p_s, p_t, reduction='none'), dim=-1) * (9 * torch.ones(student_logits.shape[0],1).cuda())) /student_logits.shape[0]/ student_logits.shape[0]
+    pdb.set_trace()
+    loss = torch.sum(torch.sum(F.kl_div(p_s, p_t, reduction='none'), dim=-1) * (9 * torch.ones(y_s.shape[0],1).cuda())) /y_s.shape[0]/ y_s.shape[0]
     return loss
 
 def util_evaluate(

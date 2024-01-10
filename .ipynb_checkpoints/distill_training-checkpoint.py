@@ -8,6 +8,8 @@ import os
 import sys
 import argparse
 from typing import List
+import pickle
+from datasets import load_from_disk
 from pathlib import Path
 import datasets
 import torch
@@ -34,8 +36,13 @@ from textbrewer.distiller_utils import auto_forward
 from LLMPruner.utils.prompter import Prompter, ZeroPrompter
 from LLMPruner.datasets.ppl_dataset import get_loaders
 from utils import DistillDataCollatorForSeq2Seq, evaluate_metric
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 
-device = "cuda:0" if torch.cuda.is_available() else "cpu"
+local_rank = int(os.environ.get('LOCAL_RANK', -1))
+print("Available Device:GPU-", local_rank)
+device = torch.device("cuda", local_rank)
 
 def main(args):
     # Set WanDB
@@ -56,8 +63,8 @@ def main(args):
     if ddp:
         gradient_accumulation_steps = gradient_accumulation_steps // world_size
 
-    if device == 'cuda:0':
-        model.half()
+    # if device == 'cuda:0':
+    #     model.half()
 
     tokenizer.pad_token_id = 0
     tokenizer.padding_side = "right"
@@ -96,7 +103,6 @@ def main(args):
                 data_point["output"], 
             )
         elif 'boolq' in args.data_path.lower():
-            # pdb.set_trace()
             full_prompt = prompter.generate_prompt(
                 data_point["question"],
                 data_point["passage"],
@@ -106,7 +112,6 @@ def main(args):
             raise NotImplementedError
 
         tokenized_full_prompt = tokenize(full_prompt)
-        # pdb.set_trace()
         if not args.train_on_inputs:
             if 'alpaca' in args.data_path.lower() or 'lamini' in args.data_path.lower():
                 user_prompt = prompter.generate_prompt(
@@ -126,7 +131,6 @@ def main(args):
                     user_prompt_len:
                 ]  # could be sped up, probably
             elif 'boolq' in args.data_path.lower():
-                # pdb.set_trace()
                 user_prompt = prompter.generate_prompt(
                     data_point["question"],
                     data_point["passage"],
@@ -172,7 +176,7 @@ def main(args):
     # Prepare For LoRA
     
     model = prepare_model_for_int8_training(model)
-    
+    model.config.output_hidden_states=True
     # pdb.set_trace()
     if args.student_tune_model_config is None:
         config = LoraConfig(
@@ -195,12 +199,11 @@ def main(args):
 
     # Load Train Dataset
     data = load_dataset(args.data_path)
-    print(args.data_path)
-    print(data)
-    if args.cache_dataset and os.path.exists('datasets/cache/{}.bin'.format(args.data_path)):
-        # pdb.set_trace()
-        preprocess_data = torch.load('datasets/cache/{}.bin'.format(args.data_path))
-        train_data, val_data = preprocess_data['train'], preprocess_data['val']
+    # print(args.data_path)、
+    # print(data)
+    if args.cache_dataset and os.path.exists('datasets/cache/{}_train'.format(args.data_path)) and os.path.exists('datasets/cache/{}_val'.format(args.data_path)):
+        cache_file = 'datasets/cache/{}'.format(args.data_path)
+        train_data, val_data = load_from_disk(cache_file+'_train'), load_from_disk(cache_file+'_val')
     else:
         train_val = data["train"].train_test_split(
             test_size=args.val_set_size, shuffle=True, seed=42
@@ -210,19 +213,17 @@ def main(args):
         )
         train_data= train_data.select(range(13000))
 
-        val_data = {
-            args.data_path: train_val["test"].shuffle().map(generate_and_tokenize_prompt),
-        }
+        val_data = (
+            train_val["test"].shuffle().map(generate_and_tokenize_prompt)
+        )
 
-        if args.cache_dataset and args.local_rank == 0:
-            cache_file = 'datasets/cache/{}.bin'.format(args.data_path)
+        if args.cache_dataset and args.local-rank == -1:
+            cache_file = 'datasets/cache/{}'.format(args.data_path)
             cache_dir = '/'.join(cache_file.split('/')[:-1])
             directory = Path(cache_dir)
             directory.mkdir(parents=True, exist_ok=True)
-
-            torch.save({
-                'train': train_data, 'val': val_data
-            }, cache_file)
+            train_data.save_to_disk(cache_file+'_train')
+            val_data.save_to_disk(cache_file+'_val')
             print("dataset cache save success!")
     # Load Extra Validation Dataset
     if args.extra_val_dataset:
@@ -237,14 +238,14 @@ def main(args):
                 test_data = split_and_tokenizer(test_data, tokenizer, seq_len, field_name='sentence')
             val_data[extra_dataset] = test_data
 
-
     # Teacher Llama-13B Student Llama-7B
     student_model = model
     student_tokenizer = tokenizer
     
     teacher_model = LlamaForCausalLM.from_pretrained(
             args.base_model,
-            low_cpu_mem_usage=True if args.torch_version >= 1.9 else False
+            low_cpu_mem_usage=True if args.torch_version >= 1.9 else False,
+            output_hidden_states=True
         )
     teacher_tokenizer = LlamaTokenizer.from_pretrained(args.base_model)
     if args.teacher_model_config is not None:
@@ -253,10 +254,15 @@ def main(args):
             args.teacher_model_config,
             torch_dtype=torch.float16,
         )
-
-
-    teacher_model.to(device)
-    student_model.to(device)
+    
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend='nccl') 
+    device = torch.device("cuda", local_rank)
+    print("device:", device)
+    teacher_model = teacher_model.to(device)
+    student_model = student_model.to(device)
+    
+    
 
     # pdb.set_trace()
     teacher_num_trainable_params = sum(p.numel() for p in teacher_model.parameters() if p.requires_grad)
@@ -267,11 +273,13 @@ def main(args):
     student_num_trainable_params = sum(p.numel() for p in student_model.parameters() if p.requires_grad)
     print("Student Number of trainable parameters:", student_num_trainable_params)
 
-    if torch.cuda.device_count() > 1:
-        print("Let's use", torch.cuda.device_count(), "GPUs!")
-        # This will wrap your model and parallelize model computations
-        student_model = torch.nn.DataParallel(student_model, device_ids=[0,1,2,3], output_device=0)
-        teacher_model = torch.nn.DataParallel(teacher_model, device_ids=[0,1,2,3], output_device=0)
+    # teacher_model = DDP(teacher_model, device_ids=[local_rank], output_device=local_rank)
+    student_model = DDP(student_model, device_ids=[local_rank], output_device=local_rank)
+    # if torch.cuda.device_count() > 1:
+    #     print("Let's use", torch.cuda.device_count(), "GPUs!")
+    #     # This will wrap your model and parallelize model computations
+    #     student_model = torch.nn.DataParallel(student_model, device_ids=[0,1,2,3], output_device=0)
+    #     teacher_model = torch.nn.DataParallel(teacher_model, device_ids=[0,1,2,3], output_device=0)
 
     teacher_model.eval()
 
@@ -285,11 +293,12 @@ def main(args):
         train_data = train_data.remove_columns(ignore_colums)
 
     train_dataloader = DataLoader(train_data, batch_size=args.batch_size, 
-                                  collate_fn = transformers.DataCollatorForSeq2Seq(
-        student_tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True
-    ))
+                                  collate_fn = transformers.DataCollatorForSeq2Seq(student_tokenizer, 
+                                  pad_to_multiple_of=8, return_tensors="pt", padding=True),
+                                  sampler=DistributedSampler(train_data))
 
     num_epochs = args.num_epochs
+    print("number of steps",len(train_dataloader) * num_epochs)
     num_training_steps = len(train_dataloader) * num_epochs
     # Optimizer and learning rate scheduler
     optimizer = AdamW(student_model.parameters(), lr=args.learning_rate)
@@ -300,31 +309,17 @@ def main(args):
     output_path = args.output_dir
 
 
-
-    last_hidden_mse = [
-        # {"layer_T": -1, "layer_S": -1, "feature": "hidden", "loss": "hidden_mse","weight": 1, "proj": ["linear", 4096, 5120]}
+    '''intermediate_matches_configs =[]'''
+    intermediate_matches_configs = [
+        {"layer_T": 30, "layer_S": 23, "feature": "hidden", "loss": "hidden_mse","weight": 1, "proj": ["linear", 4096, 5120]},
+        {"layer_T": 20, "layer_S": 15, "feature": "hidden", "loss": "hidden_mse","weight": 1, "proj": ["linear", 4096, 5120]},
+        {"layer_T": 10, "layer_S": 8, "feature": "hidden", "loss": "hidden_mse","weight": 1, "proj": ["linear", 4096, 5120]},
         ]
 
     def simple_adaptor(batch, model_outputs):
         return {'logits': model_outputs.logits, 'hidden': model_outputs.hidden_states, 'losses': model_outputs.loss}
 
 
-    # callback can be used to evaluate the performance of the student model at each checkpoint.
-    # columns = ["input_ids", "attention_mask", "labels"]
-    # val_data = val_data["yahma/alpaca-cleaned"]
-    # ignore_colums = list(set(val_data.column_names) - set(columns)) 
-    # if version.parse(datasets.__version__) < version.parse("1.4.0"):
-    #     val_data = val_data.set_format(
-    #         type=val_data.format["type"], columns=columns, format_kwargs=val_data.format["format_kwargs"]
-    #     )
-    # else:
-    #     val_data = val_data.remove_columns(ignore_colums)
-    # val_loader = DataLoader(val_data, batch_size=args.batch_size,
-    #                         collate_fn=transformers.DataCollatorForSeq2Seq(
-    #                             student_tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True))
-    # def callback(model, step):
-    #     metric = evaluate_metric(model)
-    #     print(f'Step {step} Evaluation Finish%')
     hard_label_weight = args.hard_label_weight
     kd_loss_weight = args.kd_loss_weight
     print("=========================================================================")
@@ -334,7 +329,7 @@ def main(args):
 
     distill_config = DistillationConfig(
         temperature=args.temperature,
-        intermediate_matches=last_hidden_mse,
+        intermediate_matches=intermediate_matches_configs,
         hard_label_weight = hard_label_weight,
         kd_loss_weight = kd_loss_weight
     )
@@ -349,7 +344,9 @@ def main(args):
         model_T=teacher_model, model_S=student_model,
         adaptor_T=simple_adaptor, adaptor_S=simple_adaptor,
         logits_pro = ["linear",32000, 32000],
-        global_step_start = args.global_step_start
+        global_step_start = args.global_step_start,
+        use_softmax = args.use_softmax,
+        kd_type = args.kd_type #'dynamic_kd'
         )
 
     with distiller:
@@ -396,6 +393,8 @@ if __name__ == "__main__":
     parser.add_argument('--hard_label_weight', type=float, default=1, help='student model label weight')
     parser.add_argument('--kd_loss_weight', type=float, default=1, help='the weight of kd loss between teacher and student models')
     parser.add_argument('--temperature', type=float, default=8, help='the temperature of kd loss')
+    parser.add_argument('--kd_type', type=str, default="original_kd", help="Make sure the kd_type is in ['original_kd','dynamic_kd','focal_loss','dynamic_temperature']")
+    parser.add_argument('--use_softmax', default=False, action="store_true", help='softmax in original_kd')
 
     # Lora Configuration
     parser.add_argument('--lora_r', type=int, default=8, help='lora r')
@@ -413,7 +412,7 @@ if __name__ == "__main__":
     parser.add_argument('--resume_from_checkpoint', type=str, help="either training checkpoint or final adapter")
 
     #ddp
-    parser.add_argument('--local_rank', type=int, default=0)
+    parser.add_argument('--local-rank', type=int, default=-1)
 
     #checkpoint
     parser.add_argument('--global_step_start', type=int, default=0)
@@ -421,5 +420,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
     torch_version = int(torch.__version__.split('.')[1])
     args.torch_version = torch_version
-
+    print(vars(args))
+    
     main(args)

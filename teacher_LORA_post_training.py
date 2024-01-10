@@ -164,9 +164,12 @@ def main(args):
 
     # Load Train Dataset
     data = load_dataset(args.data_path)
-    if args.cache_dataset and os.path.exists('datasets/cache/{}.bin'.format(args.data_path)):
+    '''if args.cache_dataset and os.path.exists('datasets/cache/{}.bin'.format(args.data_path)):
         preprocess_data = torch.load('datasets/cache/{}.bin'.format(args.data_path))
-        train_data, val_data = preprocess_data['train'], preprocess_data['val']
+        train_data, val_data = preprocess_data['train'], preprocess_data['val']'''
+    if args.cache_dataset and os.path.exists('datasets/cache/{}_train'.format(args.data_path)) and os.path.exists('datasets/cache/{}_val'.format(args.data_path)):
+        cache_file = 'datasets/cache/{}'.format(args.data_path)
+        train_data, val_data = load_from_disk(cache_file+'_train'), load_from_disk(cache_file+'_val')
     else:
         train_val = data["train"].train_test_split(
             test_size=args.val_set_size, shuffle=True, seed=42

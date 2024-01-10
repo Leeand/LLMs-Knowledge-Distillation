@@ -4,23 +4,11 @@ from textbrewer.distiller_basic import BasicDistiller
 import pdb
 from LLMPruner.peft import get_peft_model_state_dict
 import wandb
+import torch.distributed as dist
+from utils import dynamic_kd_loss, focal_loss, dynamic_temperature
+
 
 class CustomDistiller(GeneralDistiller):
-    """
-    Supports intermediate features matching. **Recommended for single-teacher single-task distillation**.
-
-    Args:
-        train_config (:class:`TrainingConfig`): training configuration.
-        distill_config (:class:`DistillationConfig`): distillation configuration.
-        model_T (:class:`torch.nn.Module`): teacher model.
-        model_S (:class:`torch.nn.Module`): student model.
-        adaptor_T (Callable): teacher model's adaptor.
-        adaptor_S (Callable): student model's adaptor.
-        custom_matches (list): supports more flexible user-defined matches (testing).
-
-    The roles of `adaptor_T` and `adaptor_S` are explained in :py:func:`adaptor`.
-
-    """
 
     def __init__(self, train_config,
                  distill_config,
@@ -29,18 +17,32 @@ class CustomDistiller(GeneralDistiller):
                  adaptor_T,
                  adaptor_S,
                  logits_pro,
+                 global_step_start,
+                 use_softmax,
+                 kd_type : Optional[str] = "original_kd",
                  custom_matches: Optional[List[CustomMatch]] = None):
         # custom_matches=[{'module_T': module_T, 'module_S':module_S,
         #                 'loss': loss, 'weight': weight},...]
         super(CustomDistiller, self).__init__(train_config, distill_config, model_T, model_S, adaptor_T, adaptor_S)
-        wandb.login()
-        run = wandb.init(
-            # Set the project where this run will be logged
-            project="my-awesome-project",
-            # Track hyperparameters and run metadata
-            )
+        if dist.get_rank() == 0:
+            wandb.login()
+            run = wandb.init(
+                name='baseline+intermiediam',
+                # Set the project where this run will be logged
+                project = os.environ["WANDB_PROJECT"],
+                tags=['A100_8_SXM', 'Distillation_baseline_intermediam'],
+                notes='baseline plus media rmse loss'
+                # Track hyperparameters and run metadata
+                )
 
+        self.global_step_start = global_step_start
+        self.use_softmax = use_softmax
+        assert kd_type in ['original_kd','dynamic_kd','focal_loss','dynamic_temperature'],"kd_type is not in ['original_kd','dynamic_kd','focal_loss','dynamic_temperature']"
+        self.kd_type = kd_type
         
+        self.dynamic_kd_loss = dynamic_kd_loss
+        self.focal_loss = focal_loss
+        self.dynamic_temperature= dynamic_temperature 
         self.projs = []
         self.projs_group = []
         for im in self.d_config.intermediate_matches:
@@ -60,8 +62,10 @@ class CustomDistiller(GeneralDistiller):
                 projection = logits_pro[0]
                 dim_in = logits_pro[1]
                 dim_out = logits_pro[2]
-                self.logits_projs.append(PROJ_MAP[projection](dim_in, dim_out))
-                self.logits_projs[-1].to(self.t_config.device)
+                self.logits_projs.append(PROJ_MAP[projection](dim_in, 4096))
+                self.logits_projs.append(PROJ_MAP[projection](4096, dim_out))
+        for layer in self.logits_projs:
+                layer.to(self.t_config.device)
 
         self.has_custom_matches = False
         if custom_matches:
@@ -78,7 +82,6 @@ class CustomDistiller(GeneralDistiller):
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel(logging.INFO)
 
-        # 只有在没有配置处理器的情况下才添加新处理器
         if not self.logger.handlers:
             handler = logging.FileHandler('distill.log')
             formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -109,8 +112,8 @@ class CustomDistiller(GeneralDistiller):
 
 
             if hasattr(self.model_S.module, "save_pretrained"):
-                print("saving at "+self.t_config.output_dir+"/globalstep_"+str(global_step))
-                self.model_S.module.save_pretrained(self.t_config.output_dir+"/globalstep_"+str(global_step))
+                print("saving at "+self.t_config.output_dir+"/globalstep_"+str(global_step+int(self.global_step_start)))
+                self.model_S.module.save_pretrained(self.t_config.output_dir+"/globalstep_"+str(global_step+int(self.global_step_start)))
 
             if self.local_rank == 0:
                 torch.distributed.barrier()
@@ -125,7 +128,7 @@ class CustomDistiller(GeneralDistiller):
             self.model_T._forward_hooks = handles_T
 
     def train_on_batch(self, batch, args):
-
+        
         (teacher_batch, results_T), (student_batch, results_S) = get_outputs_from_batch(batch, self.t_config.device,
                                                                                         self.model_T, self.model_S,
                                                                                         args)
@@ -133,19 +136,25 @@ class CustomDistiller(GeneralDistiller):
         results_T = post_adaptor(self.adaptor_T(teacher_batch, results_T))
         results_S = post_adaptor(self.adaptor_S(student_batch,  results_S))
 
-        total_loss, losses_dict = self.compute_loss(results_S, results_T)
+        total_loss, losses_dict = self.compute_loss(results_S, results_T, teacher_batch, student_batch)
 
         return total_loss, losses_dict
 
-    def compute_loss(self, results_S, results_T):
-
+    def compute_loss(self, results_S, results_T, teacher_batch, student_batch):
+        
         losses_dict = dict()
-
+        
         total_loss = 0
         if 'logits' in results_T and 'logits' in results_S:
             logits_list_T = results_T['logits']  # list of tensor
             logits_list_S = results_S['logits']  # list of tensor
+
+            if self.kd_type == 'original_kd' and self.use_softmax:
+                logits_list_T = F.softmax(logits_list_T[0], dim=-1)
+                logits_list_S = F.softmax(logits_list_S[0], dim=-1)
+            
             total_kd_loss = 0
+
             if 'logits_mask' in results_S:
                 masks_list_S = results_S['logits_mask']
                 logits_list_S = select_logits_with_mask(logits_list_S, masks_list_S)  # (mask_sum, num_of_class)
@@ -153,26 +162,51 @@ class CustomDistiller(GeneralDistiller):
                 masks_list_T = results_T['logits_mask']
                 logits_list_T = select_logits_with_mask(logits_list_T, masks_list_T)  # (mask_sum, num_of_class)
 
-            if results_T['logits'][0].shape[-1] != results_S['logits'][0].shape[-1]:
-                results_S['logits'] = [self.logits_projs[-1](results_S['logits'])]
 
             if self.d_config.probability_shift is True:
                 labels_list = results_S['labels']
                 for l_T, l_S, labels in zip(logits_list_T, logits_list_S, labels_list):
                     l_T = probability_shift_(l_T, labels)
+                    # if results_T['logits'][0].shape[-1] != results_S['logits'][0].shape[-1]:
+
+                    for logits_layer in self.logits_projs:
+                        l_S = logits_layer(l_S)
+
                     if self.d_config.temperature_scheduler is not None:
                         temperature = self.d_config.temperature_scheduler(l_S, l_T, self.d_config.temperature)
                     else:
                         temperature = self.d_config.temperature
-                    total_kd_loss += self.kd_loss(l_S, l_T, temperature)
+                    if self.kd_type == 'original_kd':
+                        total_kd_loss += self.kd_loss(l_S, l_T, temperature)
+                    elif self.kd_type == 'dynamic_kd':
+                        total_kd_loss += self.dynamic_kd_loss(l_S, l_T, temperature)
+                    elif self.kd_type == 'focal_loss':
+                        total_kd_loss += self.focal_loss(l_S, l_T, temperature, teacher_batch["labels"])
+                    elif self.kd_type == 'dynamic_temperature':
+                        total_kd_loss += self.dynamic_temperature(l_S, l_T)
+                
             else:
                 for l_T, l_S in zip(logits_list_T, logits_list_S):
+                    # if results_T['logits'][0].shape[-1] != results_S['logits'][0].shape[-1]:
+
+                    for logits_layer in self.logits_projs:
+                        l_S = logits_layer(l_S)
+
                     if self.d_config.temperature_scheduler is not None:
                         temperature = self.d_config.temperature_scheduler(l_S, l_T, self.d_config.temperature)
                     else:
                         temperature = self.d_config.temperature
-                    total_kd_loss += self.kd_loss(l_S, l_T, temperature)
-            #total_loss += total_kd_loss * self.d_config.kd_loss_weight
+                    
+                    if self.kd_type == 'original_kd':
+                        total_kd_loss += self.kd_loss(l_S, l_T, temperature)
+                    elif self.kd_type == 'dynamic_kd':
+                        total_kd_loss += self.dynamic_kd_loss(l_S, l_T, temperature)
+                    elif self.kd_type == 'focal_loss':
+                        total_kd_loss += self.focal_loss(l_S, l_T, temperature, teacher_batch["labels"])
+                    elif self.kd_type == 'dynamic_temperature':
+                        total_kd_loss += self.dynamic_temperature(l_S, l_T)
+                        
+            total_loss += total_kd_loss * self.d_config.kd_loss_weight
             losses_dict['unweighted_kd_loss'] = total_kd_loss
 
         inters_T = {feature: results_T.get(feature, []) for feature in FEATURES}
@@ -202,6 +236,7 @@ class CustomDistiller(GeneralDistiller):
                 name_T = str(layer_T)
                 if self.projs[ith]:
                     # inter_T = self.projs[ith](inter_T)
+                    inter_S = inter_S.float()
                     inter_S = self.projs[ith](inter_S)
             intermediate_loss = match_loss(inter_S, inter_T, mask=inputs_mask_S)
             total_loss += intermediate_loss * match_weight
@@ -222,7 +257,6 @@ class CustomDistiller(GeneralDistiller):
             total_hl_loss = 0
             for loss in results_S['losses']:
                 # in case of multi-GPU
-                # pdb.set_trace()
                 total_hl_loss += loss.mean()
             total_loss += total_hl_loss * self.d_config.hard_label_weight
             losses_dict['unweighted_hard_label_loss'] = total_hl_loss
@@ -232,7 +266,9 @@ class CustomDistiller(GeneralDistiller):
                 value = value.item()
             formated_losses_dict[key]=value
         self.logger.info(formated_losses_dict)
-        wandb.log({"unweighted_kd_loss": total_kd_loss, "unweighted_hard_label_loss": total_hl_loss})
+        if dist.get_rank() == 0:
+            wandb.log(formated_losses_dict)
+        print(losses_dict)
         return total_loss, losses_dict
 
     def add_match(self, match: CustomMatch):

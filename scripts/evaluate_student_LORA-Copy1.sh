@@ -6,7 +6,7 @@ tune_ckpt_name="tune_log/middle_layer_k0.5_h1_dynamicT_config2-middle_lw0.1_DDP_
 prune_ckpt="prune_log/llama_prune" # e.g., prune_log/llama_prune
 
 tune_id="${tune_ckpt_name##*/}"
-python lm-evaluation-harness/main.py --model hf-causal-experimental --model_args  checkpoint=$prune_ckpt/pytorch_model.bin,peft=$tune_ckpt_name,config_pretrained=$base_model --tasks openbookqa,arc_easy,winogrande,hellaswag,arc_challenge,piqa,boolq --device cuda:0 --output_path results/${tune_id}.json --no_cache
+python lm-evaluation-harness/main.py --model hf-causal-experimental --model_args  checkpoint=$prune_ckpt/pytorch_model.bin,peft=$tune_ckpt_name,config_pretrained=$base_model --tasks openbookqa,arc_easy,winogrande,hellaswag,arc_challenge,piqa,boolq --device cuda:1 --output_path results/${tune_id}.json --no_cache
 # accelerate launch lm-evaluation-harness/main.py --model hf-causal-experimental --model_args checkpoint=$prune_ckpt/pytorch_model.bin,peft=$tune_ckpt_name,config_pretrained=$base_model --tasks openbookqa,arc_easy,winogrande,hellaswag,arc_challenge,piqa,boolq --device cuda:0,1,2,3 --output_path results/${tune_id}.json --no_cache
 
 # accelerate launch '80GB' lm-evaluation-harness/main.py  --model hf-causal-experimental --model_args checkpoint=$prune_ckpt/pytorch_model.bin,peft=$tune_ckpt_name,config_pretrained=$base_model --tasks openbookqa,arc_easy,winogrande,hellaswag,arc_challenge,piqa,boolq --output_path results/${tune_id}.json --no_cache

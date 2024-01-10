@@ -451,6 +451,9 @@ class LlamaModel(LlamaPreTrainedModel):
         # Initialize weights and apply final processing
         #self.post_init()
 
+        # self.layer_norm = nn.LayerNorm(normalized_shape=your_desired_shape, eps=1e-12)
+
+
     def get_input_embeddings(self):
         return self.embed_tokens
 
