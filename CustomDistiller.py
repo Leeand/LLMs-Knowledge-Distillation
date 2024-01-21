@@ -22,7 +22,7 @@ class CustomDistiller(GeneralDistiller):
                  dt_normalization_type,
                  intermediate_normalization_type,
                  kd_type : Optional[str] = "original_kd",
-                 intermediate_control_config='config0',
+                 intermediate_control_config='',
                  layer_weight=0.1,
                  custom_matches: Optional[List[CustomMatch]] = None):
         # custom_matches=[{'module_T': module_T, 'module_S':module_S,
@@ -31,7 +31,7 @@ class CustomDistiller(GeneralDistiller):
         super(CustomDistiller, self).__init__(train_config, distill_config, model_T, model_S, adaptor_T, adaptor_S)
         if dist.get_rank() == 0:
             wandb.login()
-            experiment_name = f"middle_layer_DynamicT_k{self.d_config.kd_loss_weight}_h{self.d_config.hard_label_weight}_lw{layer_weight}_{intermediate_control_config}"
+            experiment_name = f"middle_layer_DynamicT_6_k{self.d_config.kd_loss_weight}_h{self.d_config.hard_label_weight}_lw{layer_weight}_{intermediate_control_config}"
             run = wandb.init(
                 name=experiment_name,
                 # Set the project where this run will be logged
@@ -121,8 +121,12 @@ class CustomDistiller(GeneralDistiller):
 
 
             if hasattr(self.model_S.module, "save_pretrained"):
-                print("saving at "+self.t_config.output_dir+"/globalstep_"+str(global_step+int(self.global_step_start)))
-                self.model_S.module.save_pretrained(self.t_config.output_dir+"/globalstep_"+str(global_step+int(self.global_step_start)))
+                # 构建保存模型的目标路径
+                output_dir = self.t_config.output_dir
+                save_path = os.path.join(output_dir, f"globalstep_{global_step + int(self.global_step_start)}")
+                if not os.path.exists(save_path):
+                    print("saving at "+self.t_config.output_dir+"/globalstep_"+str(global_step+int(self.global_step_start)))
+                    self.model_S.module.save_pretrained(self.t_config.output_dir+"/globalstep_"+str(global_step+int(self.global_step_start)))
 
             if self.local_rank == 0:
                 torch.distributed.barrier()

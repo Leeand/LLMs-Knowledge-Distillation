@@ -1,0 +1,23 @@
+{
+    "hard_label_weight":{
+        "values":[1]
+        },
+    "kd_loss_weight": {
+        "values": [0.0000001,1]
+        },
+    "temperature": {
+        "values": [8,20]
+        },
+    "dtnormalization_type": {
+        "values": ["","standardize"]
+        },
+    "intermediate_normalization_type":{
+        "values":["","standardize"]
+        },
+    "intermediate_control_config":{
+        "values":["","tinyl_last"]
+    },
+    "kd_type":{
+        "values": ["original_kd","dynamic_temperature"]
+    }
+}

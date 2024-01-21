@@ -10,7 +10,7 @@ from typing import Tuple
 
 import torch
 import numpy as np
-from transformers import LlamaTokenizer, GenerationConfig, LlamaConfig, AutoModelForCausalLM
+from transformers import AutoTokenizer,LlamaTokenizer, GenerationConfig, LlamaConfig, AutoModelForCausalLM
 from LLMPruner.models.hf_llama.modeling_llama import LlamaForCausalLM, LlamaRMSNorm, LlamaAttention, LlamaMLP
 
 import LLMPruner.torch_pruning as tp 
@@ -36,11 +36,13 @@ def main(args):
         setup_sublogger=True
     )
 
-    tokenizer = LlamaTokenizer.from_pretrained(args.base_model)
+
+    # tokenizer = LlamaTokenizer.from_pretrained(args.base_model)
     model = AutoModelForCausalLM.from_pretrained(
         args.base_model,
         low_cpu_mem_usage=True if args.torch_version >=1.9 else False
     )
+    tokenizer = AutoTokenizer.from_pretrained(args.base_model)
     if args.device != "cpu":
         model.half()
     model.to(args.device)

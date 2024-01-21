@@ -5,7 +5,7 @@ import numpy as np
 from transformers import PreTrainedTokenizerBase
 from transformers.utils import PaddingStrategy
 import sys
-sys.path.append('./lm-evaluation-harness')
+sys.path.append('./lm_evaluation_harness')
 from lm_eval import tasks, evaluator
 import lm_eval
 import json
@@ -254,7 +254,7 @@ def dynamic_temperature(student_logits, teacher_logits, normalization_type=''):
     p_s = F.log_softmax(student_logits/tea_std, dim=1)
     p_t = F.softmax(teacher_logits/stu_std, dim=1)
     # pdb.set_trace()
-    loss = torch.sum(torch.sum(F.kl_div(p_s, p_t, reduction='none'), dim=-1) * (9 * torch.ones(student_logits.shape[0],1).cuda())) /student_logits.shape[0]/ student_logits.shape[0]
+    loss = torch.sum(torch.sum(F.kl_div(p_s, p_t, reduction='none'), dim=-1) * (1 * torch.ones(student_logits.shape[0],1).cuda())) /student_logits.shape[0]/ student_logits.shape[0]
     return loss
 
 def util_evaluate(

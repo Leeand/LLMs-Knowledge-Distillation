@@ -1,11 +1,11 @@
 # 定义不同的kd_loss_weight和hard_label_weight值
 prune_ckpt_path='llama_prune'
 tune_ckpt_path='llama_13000yahma_alpaca_vast_platform'
-kd_loss_weights=( 0.5  )
+kd_loss_weights=( 0.000001  )
 hard_label_weights=( 1 )
 layer_weights=( 0.1 )
 # 定义映射层配置数组
-configs=("config2-middle" "config3-middle")
+configs=("config1")
 
 # 循环遍历不同的权重组合
 for kd_loss_weight in "${kd_loss_weights[@]}"; do
@@ -13,7 +13,7 @@ for kd_loss_weight in "${kd_loss_weights[@]}"; do
         for config in "${configs[@]}"; do
             for layer_weight in "${layer_weights[@]}"; do
                 # 根据配置更新 hyperparamaters_name
-                hyperparamaters_name="middle_layer_k${kd_loss_weight}_h${hard_label_weight}_dynamicT_${config}_lw${layer_weight}_DDP_r16_newteacher"
+                hyperparamaters_name="middle_layer_k${kd_loss_weight}_h${hard_label_weight}_dynamicT_1_${config}_lw${layer_weight}_DDP_r16_newteacher"
 
                 output_dir_name="tune_log/${hyperparamaters_name}"
 

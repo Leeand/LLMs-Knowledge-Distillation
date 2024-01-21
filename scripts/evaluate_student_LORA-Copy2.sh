@@ -2,7 +2,7 @@
 export PYTHONPATH='.'
 
 base_model="huggyllama/llama-7b" # e.g., huggyllama/llama-7b
-tune_ckpt_name="tune_log/middle_layer_k0.5_h1_dynamicT_config1_lw0.1_DDP_r16_newteacher/globalstep_1950"  # e.g., student_tune_log/llama_13000yahma_alpaca   tune_log/k1_h1_t1/globalstep_6500 tune_log/k1_h1_t4/globalstep_6500 tune_log/k1_h1_t8/globalstep_6500
+tune_ckpt_name="tune_log/middle_layer_k0.000001_h1_dynamicT_1_config1_lw0.1_DDP_r16_newteacher/globalstep_1950"  # e.g., student_tune_log/llama_13000yahma_alpaca   tune_log/k1_h1_t1/globalstep_6500 tune_log/k1_h1_t4/globalstep_6500 tune_log/k1_h1_t8/globalstep_6500
 prune_ckpt="prune_log/llama_prune" # e.g., prune_log/llama_prune
 
 tune_id="${tune_ckpt_name##*/}"
